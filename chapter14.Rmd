@@ -1,0 +1,186 @@
+---
+title: "chapter14"
+author: "Xinqian Cai"
+date: "2022/2/27"
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+
+## 1. Load the `nsw_mixtape` data that can be found in the **causaldata** package associated with the book, or download it fromLoad the `dengue.csv` file provided to you, or from [this site](https://vincentarelbundock.github.io/Rdatasets/csv/causaldata/nsw_mixtape.csv). Documentation on the variables is available through the package, or [here](https://vincentarelbundock.github.io/Rdatasets/doc/causaldata/nsw_mixtape.html).
+
+Then, drop the `data_id` variable from the data.
+
+```{r}
+library(dplyr)
+library(tidyverse)
+nsw<- causaldata::nsw_mixtape
+nsw<-nsw|>
+  select(-data_id)
+```
+
+
+## 2. Let's see where we're at before we do any matching at all. `nsw_mixtape` is from an experiment (read that documentation!) so that should already put us in a pretty good place.
+```{r}
+# First, create a variable called `weight` in your data equal to 1 for all observations (weights that are all 1 will have no effect, but this will give us a clue as to how we could incorporate matching weights easily).
+
+nsw<-nsw|>
+  mutate(weight=1)
+
+#*Language-specific instructions*:
+#- One easy way to get the balance table in R is with `sumtable()` in **vtable** by setting the `group` and `group.weight` options (and possibly `group.test`).
+#- One easy way to get the table in Stata is with `tabstat` using the `by()` option.
+```
+
+```{r}
+#Second, write code that uses a set of given weights to estimate the effect of `treat` on `re78`, using `weight` as weights, and prints out a summary of the regression results. The easiest way to do this is probably weighted regression; see The Effect Section 13.4.1, but without any controls or predictors other than `treat`. **Keep in mind the standard errors on the estimate won't be quite right, since they won't account for the uncertainty in creating the weights.**
+
+library(modelsummary)
+m2<-lm(re78~treat,data = nsw,weights = weight)
+msummary(m2,stars = c('*'=0.1, '**'=0.05,'***'=0.01))
+summary(m2)
+```
+
+```{r}
+#Third, write code that creates and prints out a weighted balance table for all variables across values of `treat`, using `weight` as weighted. See The Effect Section 14.6.3. Don't worry about getting a table with tests of significant differences for now; just the means. 
+
+library(cobalt)
+bal.tab(nsw, treat = nsw$treat, weights = nsw$weight)
+
+library(vtable)
+sumtable(data = nsw, group = 'treat', group.test = TRUE, group.weights = 'weight')
+
+#*Language-specific instructions*:
+#- One easy way to get the balance table in R is with `sumtable()` in **vtable** by setting the `group` and `group.weight` options (and possibly `group.test`).
+#- One easy way to get the table in Stata is with `tabstat` using the `by()` option.
+```
+
+
+## 2b. Is there anything potentially concerning about the balance table, given that this is a randomized experiment where `treat` was randomly assigned?
+```{r}
+# From the balance table, we can see that there are statistically significant differences in variables of "hisp"(1 star) and "nodegree"(3 stars) between the treated and untreated group at the 99% level. So we could say that the back doors via "hisp" and " nodegree" is still open. We might need to do something to balance "hisp" and "nodegree" other than randomized experiment.
+```
+
+
+## 3. Using all of the variables in the data except `treat` and `re78` as matching variables, perform 3-nearest-neighbor Mahalanobis distance matching with replacement and no caliper (The Effect 14.4.1) and calculate the post-matching average treatment on the treated effect of `treat` on `re78`.
+
+```{r}
+# load package
+library(MatchIt)
+library(WeightIt)
+library(cobalt)
+library(tidyverse)
+library(broom)
+library(haven)
+theme_set(theme_minimal()) # optional but I like this one
+
+# matching
+match3<- matchit(treat~age+educ+black+hisp+marr+nodegree+re74+re75, data=nsw, method = "nearest", distance = "mahalanobis", ratio = 3, estimated="ATT", replace = TRUE)
+
+# post-matching ATT
+md3<-match.data(match3)
+
+
+matchdiff3<-lm(re78~treat,data = md3, weights = weights)
+tidy(matchdiff3, conf.int = TRUE)
+summary(matchdiff3)
+
+# The att is that taking training program is associated with 2058 dollars increase in real earnigns in 1978.
+
+```
+
+## 4. Create a post-matching balance table showing balance for all the matching variables (you'll probably want to use the balance function designed to follow the matching function you used, from the same package). Write a sentence commenting on whether the balance looks good. You may have to read the documentation for the function you use to figure out what the results mean.
+
+```{r}
+sumtable(data = md3, group = 'treat', group.test = TRUE, group.weights = 'weights')
+
+# Based on the weighted means of the matching variables are not significantly different between the treatment and control different between the treatment and control groups (no star), so the balance looks good.
+```
+
+
+## 5. Switching over to propensity score matching, use the same matching variables as in Question 3 to estimate the propensity to be treated (with a logit regression), and then add the treatment propensity to the data set as a new variable called `propensity`. Trim the propensity score, setting to missing any values from 0 to .05 or from .95 to 1 (this is a different method than done in the chapter).
+##Be careful to get the predicted *probability of treatment* and not the predicted *index function*. You can check this by making sure the values are all between 0 and 1.
+##(also, note, your estimation shouldn't produce any propensities that end up actually getting trimmed, but write the code to do so anyway, just in case)
+
+```{r}
+# PS weighting
+weight5<-weightit(treat~age+educ+black+hisp+marr+nodegree+re74+re75, data = nsw, method = "ps", estimand = "ATT")
+
+weight5b<-glm(treat~age+educ+black+hisp+marr+nodegree+re74+re75,data = nsw, family = binomial(link = "logit"))
+
+ps_check<-predict(weight5b,type="response")
+
+
+summary(weight5$ps)
+summary(ps_check)
+
+
+
+# Creating trimmed "propensity"
+md5<-nsw|>
+  mutate(propensity = case_when(weight5$ps<=0.05 & weight5$ps>=0.95 ~ NA_real_, TRUE ~ weight5$ps))
+
+```
+
+
+## 6. Create a new variable in the data called `ipw` with the inverse probability weight, and then estimate the treatment effect using those weights in a linear regression (keeping in mind the standard errors won't be quite right).## Note that the same tools you used to trim `propensity` conditional on its value can also be used to calculate `ipw` in one way for treated observations and in another way for untreated observations.
+
+```{r}
+# creating ipw
+ipw<-get_w_from_ps(ps=md5$propensity,treat = md5$treat, estimand = "ATE")
+summary(ipw)
+
+
+
+md6<-md5|>
+  mutate(ipw=ipw)
+
+# estimate treatment effect
+matchdiff6<-lm(re78~treat, data = md6, weights = ipw)
+tidy(matchdiff6, conf.int=TRUE)
+summary(matchdiff6)
+# The average treatment effect is that taking the job-training program is associated with the 1641 dollars increase in the real earnings in 1978.
+```
+
+
+## 7. Make a common support graph, overlaying the density of the `propensity` variable for treated observations on top of the density of the `propensity` variable for untreated observations. You may want to refer to [this guide](https://lost-stats.github.io/Presentation/Figures/density_plots.html) if you are not familiar with your language's graphing capabilities. Write a line commenting on how the common support looks.
+
+```{r}
+md7<-md6|>
+  select(treat,propensity)|>
+  mutate(treatment=case_when(treat==1~'treatment',treat==0~'notreatment'))
+ggplot(md7, aes(x = propensity, fill = treatment)) + geom_density(alpha = 0.5)
+
+# Based on the graph, the assumption of common support of the propensity variable is generally good.
+
+```
+
+## 8. Use the prepackaged command for inverse probability weighting used in the chapter for your language to estimate the treatment effect. Don't apply a trim (as previously established, for this particular problem it doesn't do much).
+
+```{r}
+# ps
+weight8<-weightit(treat~age+educ+black+hisp+marr+nodegree+re74+re75, data = nsw, method = "ps", estimand = "ATT")
+
+
+summary(weight8$ps)
+
+#ipw
+md8<-nsw|>
+  mutate(ipw=case_when(
+    treat==1~1/weight8$ps,
+    treat==0~1/(1-weight8$ps)
+  ))
+
+## estimate the treatment effect
+matchdiff8<-lm(re78~treat, data = md8, weights = ipw)
+summary(matchdiff8)
+msummary(matchdiff8)
+
+# The treatment effect is that taking training program is associated with about 1641 dollars increase in real earnings in 1978.
+```
+
+
